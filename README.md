@@ -1,18 +1,18 @@
-# HAM-D Severity Prediction Pipeline
+# Depression Symptom Severity (DSS) Classification Pipeline
 
-Last Updated: April 30, 2026
+Last Updated: May 12, 2026
 
-Multi-model pipeline for clinical depression severity classification using BERT and Llama language models with class-balanced training.
+Multi-model pipeline for clinical depression severity classification using BERT and Llama language models with class-balanced training on clinical interview transcripts and depression rating scales.
 
 ## Pipeline Overview
 
-Three parallel training workflows:
+Multiple training workflows for depression severity prediction:
 
 1. **Train.py** - BERT-based baseline (XLM-RoBERTa)
 2. **Train_llm.py** - Llama 3.2-1B with QLoRA fine-tuning
+3. **translate.py** - Utilities for text translation and preprocessing
 
-
-All models train 3-class depression severity classification:
+All models train on 3-class depression severity classification:
 - Class 0: Mild/None
 - Class 1: Moderate
 - Class 2: Severe
@@ -35,46 +35,94 @@ All models train 3-class depression severity classification:
 - Class-balanced weighted cross-entropy loss
 - Effective-number weighting for imbalanced data
 
+## Setup
 
+### Installation
+
+1. Create and activate the conda environment:
+```bash
+conda env create -f environment.yml
+conda activate dss
+```
+
+Alternatively, install via pip:
+```bash
+pip install -r requirements.txt
+```
+
+2. Configure data paths in the training scripts as needed
+
+3. Ensure data files are placed in the `data/` directory (obtain separately)
 
 ## File Structure
 
 ```
-predict_hamd/
-├── Train.py                          # BERT single-run training
-├── Train_llm.py                      # Llama QLoRA single-run               
-├── learning_results/                 # BERT outputs
-│   ├── best_model/                   # Best BERT checkpoint (not included in this git)
-│   └── performance_plots/
-├── learning_results_llm/             # Llama single-run outputs
-│   ├── best_model/                   # Llama checkpoint ((not included in this git))
-│   └── performance_plots/
+DSS/
+├── README.md                         # This file
+├── environment.yml                   # Conda environment specification
+├── requirements.txt                  # Python package dependencies
+├── pipeline/                         # Main training scripts
+│   ├── Train.py                      # BERT single-run training
+│   ├── Train_llm.py                  # Llama QLoRA single-run               
+│   ├── translate.py                  # Text translation utilities
+│   ├── learning_results/             # BERT outputs
+│   │   └── performance_plots/
+│   ├── learning_results_llm/         # Llama single-run outputs
+│   │   └── performance_plots/
+│   └── learning_results_boundary/    # Boundary-specific results
+├── data/                             # ⚠️ NOT INCLUDED IN THIS GIT (CONFIDENTIAL)
+│   ├── *.csv                         # Dataset files
+│   └── daic/                         # DAIC interview transcripts
+├── Paper/                            # Research paper and writeups
+└── .gitignore                        # Git ignore rules
+
+**Note:** Data folder is excluded from git due to confidentiality. Access data files through secure channels.
+```
 
 
 ## Training Workflows
 
 ### Single-Run Training
+
+**BERT Model:**
 ```bash
-python predict_hamd/Train.py/*_llm.py
+python pipeline/Train.py
 ```
-- Trains BERT/ Llama model with fixed hyperparameters
-- Saves checkpoint to `learning_results/*_llm/`
-- Evaluates on held-out clinical data
-- On second run: loads existing checkpoint, skips training
+
+**Llama Model:**
+```bash
+python pipeline/Train_llm.py
+```
+
+- Trains model with configured hyperparameters
+- Saves outputs to `pipeline/learning_results/` or `pipeline/learning_results_llm/`
+- Evaluates on clinical test data
+- On subsequent runs: loads existing checkpoint, skips retraining unless forced
+
+### Text Preprocessing
+
+```bash
+python pipeline/translate.py
+```
+
+Utilities for text translation and preprocessing of clinical transcripts.
 
 ## Data Format
 
-Clinical dataset with demographic, temporal, and text features. Input CSV columns:
-- `text` - Clinical notes or transcripts
+**⚠️ Note:** Data files are not included in this repository due to confidentiality constraints. Data must be obtained separately and placed in the `data/` directory.
+
+Expected clinical dataset format with demographic, temporal, and text features:
+
+Input CSV columns:
+- `text` - Clinical notes, interview transcripts, or structured text data
 - `labels` - Depression severity class (0, 1, 2) for training data
-- `hamd_sum` - Ground truth severity score for evaluation
+- `hamd_sum` - Ground truth severity score (HAM-D or equivalent) for evaluation
 - `session_id` - Patient/session identifier for grouped analysis
 
-**Note:** Data paths are environment-specific; update paths in training scripts as needed.
-
-
-**Checkpoints:**
-- `best_model/` - Full model weights + LoRA adapters (for Llama)
+Data sources currently used:
+- **DAIC** - Clinician interview transcripts (in `data/daic/` when available)
+- **PDCH** - Depression screening data (in `data/` when available)
+- **EPIsoDE** - Study-specific clinical data (in `data/` when available)
 
 ## Class Balancing
 
@@ -97,16 +145,17 @@ where $\beta = 0.999$, applied as weighted cross-entropy loss.
 
 ## Outputs
 
-All models generate:
+All models generate performance metrics and visualizations in the respective `learning_results_*` directories:
 
 **Metrics:**
-- `..._holdout_overall_metrics.csv` - Accuracy, balanced accuracy, macro F1, Pearson correlation
-- `..._holdout_metrics_by_session.csv` - Per-session breakdown
+- `*_holdout_overall_metrics.csv` - Accuracy, balanced accuracy, macro F1, Pearson correlation
+- `*_holdout_metrics_by_session.csv` - Per-session breakdown
 
-**Visualizations:**
+**Visualizations (in `performance_plots/`):**
 - Confusion matrices (validation + test)
 - Session-grouped scatter plots
 - Subject trajectory plots (multi-session subjects only)
+- Training curves and loss plots
 
 
 ## Environment
