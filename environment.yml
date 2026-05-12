@@ -1,0 +1,22 @@
+name: episode-hamd
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - numpy>=1.24
+  - pandas>=2.0
+  - scikit-learn>=1.3
+  - scipy>=1.10
+  - xgboost>=1.7
+  - matplotlib>=3.7
+  - pip:
+      - torch>=2.0
+      - transformers>=4.35
+      - datasets>=2.13.0
+      - sentencepiece>=0.1.99
+      - accelerate>=0.23
+      - safetensors>=0.4.0
+      - joblib>=1.3
+      - tqdm>=4.66
