@@ -1,0 +1,30 @@
+# Ignore local data and study materials
+/data/
+/Paper/
+/pipeline/learning_results/best_model/
+/pipeline/learning_results/domain_adapted_bert/
+
+/pipeline/learning_results_boundary/best_model/
+/pipeline/learning_results_boundary/domain_adapted_bert/
+
+/pipeline/learning_results_llm/best_model/
+/pipeline/learning_results_llm/domain_adapted_bert/
+
+/pipeline/translate.py
+
+# Caches and temp
+**/__pycache__/
+**/.ipynb_checkpoints/
+**/.pickle
+**/.pkl
+**/.npz
+**/.npy
+**/.tmp
+**/.log
+**/.pt
+**/.bin
+**/.ckpt
+**/.onnx
+**/.gz
+**/.zip
+**/.DS_Store
