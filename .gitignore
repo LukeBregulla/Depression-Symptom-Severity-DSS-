@@ -10,6 +10,10 @@
 /pipeline/learning_results_llm/best_model/
 /pipeline/learning_results_llm/domain_adapted_bert/
 
+/pipeline/learning_results_treatment/best_model/
+/pipeline/learning_results_treatment/domain_adapted_bert/
+
+
 /pipeline/translate.py
 
 # Caches and temp

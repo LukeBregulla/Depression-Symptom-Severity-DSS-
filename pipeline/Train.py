@@ -11,7 +11,7 @@ from datasets import load_dataset, DatasetDict
 from transformers import AutoTokenizer, AutoModel, TrainingArguments, Trainer, DataCollatorForLanguageModeling, AutoModelForMaskedLM
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import f1_score, confusion_matrix
-from scipy.stats import pearsonr
+from scipy.stats import pearsonr, spearmanr
 from safetensors.torch import load_file as load_safetensors
 
 # Reproducibility
@@ -31,12 +31,12 @@ if torch.cuda.is_available():
 
 
 # Data Loading
-TRAIN_FILE = "/zi/home/luke.bregulla/Desktop/data/data_daic_pdch_3class_texts.csv"
-TEST_FILE = "/zi/home/luke.bregulla/Desktop/data/data_epi_en_clean.csv"
+TRAIN_FILE = "/zi/home/luke.bregulla/Desktop/DSS/data/data_daic_pdch_3class_texts.csv"
+TEST_FILE = "/zi/home/luke.bregulla/Desktop/DSS/data/data_epi_en.csv"
 
-OUTPUT_DIR = "/zi/home/luke.bregulla/Desktop/predict_hamd/learning_results"
-LOGGING_DIR = "/zi/home/luke.bregulla/Desktop/predict_hamd/learning_results/logs"
-PERFORMANCE_DIR = "/zi/home/luke.bregulla/Desktop/predict_hamd/learning_results/performance_plots"
+OUTPUT_DIR = "/zi/home/luke.bregulla/Desktop/DSS/pipeline/learning_results"
+LOGGING_DIR = "/zi/home/luke.bregulla/Desktop/DSS/pipeline/learning_results/logs"
+PERFORMANCE_DIR = "/zi/home/luke.bregulla/Desktop/DSS/pipeline/learning_results/performance_plots"
 OVERALL_METRICS_CSV_PATH = os.path.join(OUTPUT_DIR, "epi_holdout_overall_metrics.csv")
 PER_SESSION_METRICS_CSV_PATH = os.path.join(OUTPUT_DIR, "epi_holdout_metrics_by_session.csv")
 BEST_MODEL_DIR = os.path.join(OUTPUT_DIR, "best_model")
@@ -44,7 +44,7 @@ BEST_MODEL_DIR = os.path.join(OUTPUT_DIR, "best_model")
 # Load tokenizer
 BASE_MODEL = "FacebookAI/xlm-roberta-base"
 tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
-DOMAIN_ADAPTED_MODEL_DIR = "/zi/home/luke.bregulla/Desktop/predict_hamd/learning_results/domain_adapted_bert"
+DOMAIN_ADAPTED_MODEL_DIR = "/zi/home/luke.bregulla/Desktop/DSS/pipeline/learning_results/domain_adapted_bert"
 SAVE_PLOTS = True
 
 
@@ -776,6 +776,41 @@ def significance_stars(p_value):
     return "ns"
 
 
+def trajectory_agreement_metrics(y_pred_score, y_true):
+
+    y_pred_score = np.asarray(y_pred_score, dtype=float).reshape(-1)
+    y_true = np.asarray(y_true, dtype=float).reshape(-1)
+
+    if y_pred_score.size < 2 or y_true.size < 2:
+        return 0.5, 0.0, 0.5
+
+    # Spearman captures monotonic shape agreement and is invariant to scale.
+    if float(np.ptp(y_pred_score)) == 0.0 or float(np.ptp(y_true)) == 0.0:
+        spearman_rho = 0.0
+    else:
+        s_res = spearmanr(y_pred_score, y_true)
+        spearman_rho = float(s_res.statistic) if s_res is not None else np.nan
+    if np.isnan(spearman_rho):
+        spearman_rho = 0.0
+
+    # Direction agreement checks whether up/down changes match between sessions.
+    d_pred = np.diff(y_pred_score)
+    d_true = np.diff(y_true)
+    if d_pred.size == 0:
+        direction_acc = 0.5
+    else:
+        near_zero = 1e-12
+        pred_sign = np.where(np.abs(d_pred) <= near_zero, 0, np.sign(d_pred))
+        true_sign = np.where(np.abs(d_true) <= near_zero, 0, np.sign(d_true))
+        direction_acc = float(np.mean(pred_sign == true_sign))
+
+    # Weighted blend: rank-shape agreement + directional consistency.
+    tas = 0.7 * ((spearman_rho + 1.0) / 2.0) + 0.3 * direction_acc
+    tas = float(np.clip(tas, 0.0, 1.0))
+
+    return tas, spearman_rho, direction_acc
+
+
 def save_session_grouped_epi_scatter(x_values, y_values, groups, output_path, title, x_label):
     unique_groups = sorted(set(groups))
     cmap = plt.get_cmap("tab10", max(len(unique_groups), 1))
@@ -957,20 +992,8 @@ def save_subject_trajectory_grid(session_ids, pred_scores, hamd_values, output_p
         ax2 = ax.twinx()
         ax2.plot(x, y_pred_score, marker="s", color="#D17A22", linestyle="--", linewidth=1.8, label="Pred score (0-1)")
 
-        # Pearson is undefined if one side is constant; keep the plot and report neutral stats.
-        if float(np.ptp(y_pred_score)) == 0.0 or float(np.ptp(y_true)) == 0.0:
-            rho = 0.0
-            p_val = 1.0
-        else:
-            rho_res = pearsonr(y_pred_score, y_true)
-            rho = float(rho_res.statistic) if rho_res is not None else np.nan
-            p_val = float(rho_res.pvalue) if rho_res is not None else np.nan
-        if np.isnan(rho):
-            rho = 0.0
-        if np.isnan(p_val):
-            p_val = 1.0
-        stars = significance_stars(p_val)
-        ax.set_title(f"{subj} | rho={rho:.2f} ({stars})", fontsize=9)
+        tas, _, _ = trajectory_agreement_metrics(y_pred_score, y_true)
+        ax.set_title(f"{subj} | TAS={tas:.2f}", fontsize=9)
         ax.set_xticks(x.tolist())
         ax.set_xlabel("Session")
         ax.set_ylabel("True HAM-D")
@@ -1009,8 +1032,17 @@ def save_subject_trajectory_grid(session_ids, pred_scores, hamd_values, output_p
         r, c = divmod(j, ncols)
         axes[r][c].axis("off")
 
-    fig.suptitle("Subject Trajectories (subjects with >=2 sessions) | dual y-axis with per-panel zoom", y=1.01)
-    fig.tight_layout()
+    fig.suptitle("Subject Trajectories (subjects with >=2 sessions) | dual y-axis with per-panel zoom", y=0.99)
+    fig.text(
+        0.5,
+        0.01,
+        "TAS (0-1): higher = better trajectory match; combines rank-shape agreement and up/down change consistency, independent of absolute scale.",
+        ha="center",
+        va="bottom",
+        fontsize=8,
+        color="#444444",
+    )
+    fig.tight_layout(rect=[0, 0.04, 1, 0.97])
     fig.savefig(output_path, dpi=180, bbox_inches="tight")
     plt.close(fig)
 
