@@ -1,2 +1,0 @@
-accuracy,balanced_accuracy,macro_f1,rho_pearson,p_value,confusion_matrix
-0.76,0.5346083788706739,0.46028708133971286,0.110400538231371,0.34571945222588385,"[[0, 0, 2], [0, 47, 14], [0, 2, 10]]"

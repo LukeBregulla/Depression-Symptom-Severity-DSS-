@@ -36,15 +36,15 @@ if torch.cuda.is_available():
 #----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 # Data loading
-TRAIN_FILE = "/zi/home/luke.bregulla/Desktop/data/data_daic_pdch_3class_texts.csv"
-TEST_FILE = "/zi/home/luke.bregulla/Desktop/data/data_epi_en_clean.csv"
+TRAIN_FILE = "data_train.csv"
+TEST_FILE = "data_test.csv"
 
 # Directories
-OUTPUT_DIR = "/zi/home/luke.bregulla/Desktop/predict_hamd/learning_results_llm"
+OUTPUT_DIR = "learning_results"
 LOGGING_DIR = os.path.join(OUTPUT_DIR, "logs")
 PERFORMANCE_DIR = os.path.join(OUTPUT_DIR, "performance_plots")
-OVERALL_METRICS_CSV_PATH = os.path.join(OUTPUT_DIR, "epi_holdout_overall_metrics.csv")
-PER_SESSION_METRICS_CSV_PATH = os.path.join(OUTPUT_DIR, "epi_holdout_metrics_by_session.csv")
+OVERALL_METRICS_CSV_PATH = os.path.join(OUTPUT_DIR, "holdout_overall_metrics.csv")
+PER_SESSION_METRICS_CSV_PATH = os.path.join(OUTPUT_DIR, "holdout_metrics_by_session.csv")
 BEST_MODEL_DIR = os.path.join(OUTPUT_DIR, "best_model")
 
 # Model
@@ -827,30 +827,30 @@ def main():
             print(f"Saved per-session metrics CSV: {PER_SESSION_METRICS_CSV_PATH}")
 
             if SAVE_PLOTS:
-                session_plot_path = os.path.join(PERFORMANCE_DIR, "epi_hamd_scatter_by_session.png")
+                session_plot_path = os.path.join(PERFORMANCE_DIR, "hamd_scatter_by_session.png")
                 save_session_grouped_epi_scatter(
                     x_values=np.asarray(test_scores, dtype=float),
                     y_values=np.asarray(hamd_true, dtype=float),
                     groups=session_labels,
                     output_path=session_plot_path,
-                    title=f"EPI: Predicted continuous score (0-1) vs True HAM-D by session  (rho={rho_hamd:.3f}, p={p_hamd:.3g})",
+                    title=f"Predicted continuous score (0-1) vs True HAM-D by session  (rho={rho_hamd:.3f}, p={p_hamd:.3g})",
                     x_label="Predicted continuous score (0-1)",
                 )
-                print(f"Saved EPI session scatter plot: {session_plot_path}")
+                print(f"Saved session scatter plot: {session_plot_path}")
 
-                session_grid_path = os.path.join(PERFORMANCE_DIR, "epi_hamd_cloud_grid_by_session.png")
+                session_grid_path = os.path.join(PERFORMANCE_DIR, "hamd_cloud_grid_by_session.png")
                 n_session_panels = save_session_cloud_grid(
                     x_values=np.asarray(test_scores, dtype=float),
                     y_values=np.asarray(hamd_true, dtype=float),
                     groups=session_labels,
                     output_path=session_grid_path,
-                    title="EPI: Predicted continuous score (0-1) vs True HAM-D per session",
+                    title="Predicted continuous score (0-1) vs True HAM-D per session",
                     x_label="Predicted continuous score (0-1)",
                 )
                 if n_session_panels > 0:
-                    print(f"Saved EPI session cloud grid ({n_session_panels} panels): {session_grid_path}")
+                    print(f"Saved session cloud grid ({n_session_panels} panels): {session_grid_path}")
 
-                trajectory_grid_path = os.path.join(PERFORMANCE_DIR, "epi_subject_trajectories_grid.png")
+                trajectory_grid_path = os.path.join(PERFORMANCE_DIR, "subject_trajectories_grid.png")
                 n_traj_subjects = save_subject_trajectory_grid(
                     session_ids=session_ids,
                     pred_scores=np.asarray(test_scores, dtype=float),

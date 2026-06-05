@@ -1,18 +1,20 @@
 import os
 import gc
 import csv
+import re
 import torch
 import random
 import numpy as np
 import torch.nn as nn
 import matplotlib.pyplot as plt
-from matplotlib.patches import Ellipse
 from datasets import load_dataset, DatasetDict
 from transformers import AutoTokenizer, AutoModel, TrainingArguments, Trainer, DataCollatorForLanguageModeling, AutoModelForMaskedLM
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import f1_score, confusion_matrix
-from scipy.stats import pearsonr, spearmanr
+from sklearn.metrics import f1_score, confusion_matrix, roc_auc_score, roc_curve, auc
 from safetensors.torch import load_file as load_safetensors
+
+plt.rcParams["font.family"] = "serif"
+plt.rcParams["font.serif"] = ["Georgia", "DejaVu Serif", "Times New Roman", "serif"]
 
 # Reproducibility
 SEED = 42
@@ -32,19 +34,24 @@ if torch.cuda.is_available():
 
 # Data Loading
 TRAIN_FILE = "/zi/home/luke.bregulla/Desktop/DSS/data/data_daic_pdch_3class_texts.csv"
-TEST_FILE = "/zi/home/luke.bregulla/Desktop/DSS/data/data_epi_en.csv"
+TEST_FILE = "/zi/home/luke.bregulla/Desktop/DSS/data/data_epi_en_V12.csv"
 
-OUTPUT_DIR = "/zi/home/luke.bregulla/Desktop/DSS/pipeline/learning_results"
-LOGGING_DIR = "/zi/home/luke.bregulla/Desktop/DSS/pipeline/learning_results/logs"
-PERFORMANCE_DIR = "/zi/home/luke.bregulla/Desktop/DSS/pipeline/learning_results/performance_plots"
-OVERALL_METRICS_CSV_PATH = os.path.join(OUTPUT_DIR, "epi_holdout_overall_metrics.csv")
-PER_SESSION_METRICS_CSV_PATH = os.path.join(OUTPUT_DIR, "epi_holdout_metrics_by_session.csv")
+OUTPUT_DIR = "/zi/home/luke.bregulla/Desktop/DSS/pipeline/learning_results_V12"
+LOGGING_DIR = "/zi/home/luke.bregulla/Desktop/DSS/pipeline/learning_results_V12/logs"
+PERFORMANCE_DIR = "/zi/home/luke.bregulla/Desktop/DSS/pipeline/learning_results_V12/performance_plots"
+OVERALL_METRICS_CSV_PATH = os.path.join(OUTPUT_DIR, "epi_holdout_overall_metrics_V12.csv")
+PER_SESSION_METRICS_CSV_PATH = os.path.join(OUTPUT_DIR, "epi_holdout_metrics_by_session_V12.csv")
+AUC_DETAILS_CSV_PATH = os.path.join(OUTPUT_DIR, "epi_holdout_auc_details_V12.csv")
 BEST_MODEL_DIR = os.path.join(OUTPUT_DIR, "best_model")
+DATA_DISTRIBUTION_PLOT_PATH = os.path.join(PERFORMANCE_DIR, "dataset_class_distribution_train_test.png")
+ROLE_STATS_CSV_PATH = os.path.join(OUTPUT_DIR, "dataset_role_word_token_stats.csv")
+
+os.environ["TENSORBOARD_LOGGING_DIR"] = LOGGING_DIR
 
 # Load tokenizer
 BASE_MODEL = "FacebookAI/xlm-roberta-base"
 tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
-DOMAIN_ADAPTED_MODEL_DIR = "/zi/home/luke.bregulla/Desktop/DSS/pipeline/learning_results/domain_adapted_bert"
+DOMAIN_ADAPTED_MODEL_DIR = "/zi/home/luke.bregulla/Desktop/DSS/pipeline/learning_results_V12/domain_adapted_bert"
 SAVE_PLOTS = True
 
 
@@ -56,7 +63,6 @@ SAVE_PLOTS = True
 # Training Arguments
 training_args = TrainingArguments(
     output_dir=OUTPUT_DIR,
-    logging_dir=LOGGING_DIR,
     eval_strategy="epoch",
     save_strategy="epoch",
     logging_strategy="epoch",
@@ -86,7 +92,6 @@ DROPOUT_RATE = 0.3
 NUM_CLASSES = 3
 CLASS_BALANCE_BETA = 0.999
 EFN_WEIGHT_POWER = 1.0
-CLASS_SCORE_ANCHORS = np.asarray([0, 0.5, 1], dtype=np.float32)
 
 
 #----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -115,19 +120,6 @@ def build_class_weights(
     return weights.astype(np.float32), counts.astype(np.int64)
 
 
-def logits_to_scores(predictions):
-    """Convert logits/probabilities to continuous plot score in [0,1]."""
-    logits = np.asarray(predictions, dtype=float)
-    if logits.ndim == 1:
-        logits = logits.reshape(-1, NUM_CLASSES)
-    shifted = logits - np.max(logits, axis=1, keepdims=True)
-    exp_logits = np.exp(shifted)
-    probs = exp_logits / np.clip(np.sum(exp_logits, axis=1, keepdims=True), 1e-8, None)
-    scores = probs @ CLASS_SCORE_ANCHORS
-    return np.clip(scores.reshape(-1), 0.0, 1.0)
-
-
-
 def balanced_accuracy(y_true, y_pred):
     """Balanced accuracy on a fixed 3-class label space [0,1,2]."""
     cm = confusion_matrix(y_true, y_pred, labels=[0, 1, 2]).astype(float)
@@ -147,8 +139,7 @@ def write_overall_metrics_csv(output_path, metrics_row):
                 "accuracy",
                 "balanced_accuracy",
                 "macro_f1",
-                "rho_pearson",
-                "p_value",
+                "roc_auc_ovr_macro",
                 "confusion_matrix",
             ],
         )
@@ -186,12 +177,210 @@ def write_per_session_metrics_csv(output_path, session_labels, true_classes, pre
         writer.writerows(rows)
 
 
+def write_auc_details_csv(output_path, rows):
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "class_id",
+                "class_count",
+                "auc_ovr",
+                "macro_auc_ovr",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def save_ovr_roc_panel(y_true, y_scores, macro_auc, output_path):
+    """Save a single 3-panel one-vs-rest ROC figure for all classes."""
+    y_true = np.asarray(y_true, dtype=np.int64).reshape(-1)
+    y_scores = np.asarray(y_scores, dtype=float)
+    if y_scores.ndim != 2 or y_scores.shape[1] != 3:
+        raise ValueError("y_scores must have shape (n_samples, 3)")
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.6), sharex=True, sharey=True)
+    class_aucs = {}
+
+    for class_id, ax in enumerate(axes):
+        y_true_bin = (y_true == class_id).astype(np.int64)
+        y_score = y_scores[:, class_id]
+
+        has_pos = int(np.sum(y_true_bin == 1)) > 0
+        has_neg = int(np.sum(y_true_bin == 0)) > 0
+        if not (has_pos and has_neg):
+            ax.text(0.5, 0.5, f"Class {class_id}\ninsufficient labels", ha="center", va="center", transform=ax.transAxes)
+            ax.set_title(f"Class {class_id} vs Rest")
+            ax.set_xlim(0.0, 1.0)
+            ax.set_ylim(0.0, 1.0)
+            ax.plot([0, 1], [0, 1], linestyle="--", color="gray", linewidth=1.2)
+            ax.grid(alpha=0.2)
+            class_aucs[class_id] = float("nan")
+            continue
+
+        fpr, tpr, _ = roc_curve(y_true_bin, y_score)
+        class_auc = float(auc(fpr, tpr))
+        class_aucs[class_id] = class_auc
+
+        ax.plot(fpr, tpr, color="#1F77B4", linewidth=2.0, label=f"AUC = {class_auc:.3f}")
+        ax.plot([0, 1], [0, 1], linestyle="--", color="gray", linewidth=1.2)
+        ax.set_xlim(0.0, 1.0)
+        ax.set_ylim(0.0, 1.0)
+        ax.set_title(f"Class {class_id} vs Rest")
+        ax.legend(loc="lower right", frameon=False)
+        ax.grid(alpha=0.2)
+
+    axes[0].set_ylabel("True Positive Rate")
+    for ax in axes:
+        ax.set_xlabel("False Positive Rate")
+
+    fig.suptitle(f"One-vs-Rest ROC Curves (Macro AUC = {macro_auc:.3f})", y=1.03)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    return class_aucs
+
+
+def hamd_to_three_classes(hamd_values):
+    hamd_values = np.asarray(hamd_values, dtype=float)
+    return np.where(hamd_values <= 7, 0, np.where(hamd_values <= 23, 1, 2)).astype(np.int64)
+
+
+def extract_role_text(full_text, role):
+    text = "" if full_text is None else str(full_text)
+    pattern = rf"{role}\s*:\s*(.*?)(?=(?:therapist|patient)\s*:|$)"
+    matches = re.findall(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+    if not matches:
+        return ""
+    return " ".join(m.strip() for m in matches if m and m.strip())
+
+
+def count_words(text):
+    return len(re.findall(r"\b\w+\b", text))
+
+
+def count_tokens(text):
+    stripped = text.strip()
+    if not stripped:
+        return 0
+    return len(tokenizer(stripped, add_special_tokens=False)["input_ids"])
+
+
+def build_role_stats_rows(dataset_name, texts):
+    rows = []
+    for role in ["therapist", "patient"]:
+        per_case_words = []
+        per_case_tokens = []
+        for text in texts:
+            role_text = extract_role_text(text, role)
+            per_case_words.append(count_words(role_text))
+            per_case_tokens.append(count_tokens(role_text))
+
+        words_arr = np.asarray(per_case_words, dtype=float)
+        tokens_arr = np.asarray(per_case_tokens, dtype=float)
+        rows.append(
+            {
+                "dataset": dataset_name,
+                "role": role,
+                "n_cases": int(len(texts)),
+                "avg_words_per_case": float(np.mean(words_arr)) if words_arr.size else 0.0,
+                "std_words_per_case": float(np.std(words_arr)) if words_arr.size else 0.0,
+                "avg_tokens_per_case": float(np.mean(tokens_arr)) if tokens_arr.size else 0.0,
+                "std_tokens_per_case": float(np.std(tokens_arr)) if tokens_arr.size else 0.0,
+            }
+        )
+    return rows
+
+
+def save_role_stats_csv(output_path, rows):
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "dataset",
+                "role",
+                "n_cases",
+                "avg_words_per_case",
+                "std_words_per_case",
+                "avg_tokens_per_case",
+                "std_tokens_per_case",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def save_class_distribution_plot(distribution_map, output_path):
+    labels = ["none", "moderate", "severe"]
+    dataset_items = list(distribution_map.items())
+
+    if len(dataset_items) != 2:
+        # Fallback to single-axis layout if caller passes a different number of datasets.
+        x = np.arange(len(labels), dtype=float)
+        fig, ax = plt.subplots(figsize=(8.0, 5.0))
+        for i, (name, counts) in enumerate(dataset_items):
+            counts = np.asarray(counts, dtype=int)
+            bars = ax.bar(x + i * 0.25, counts, width=0.25, label=name, alpha=0.9)
+            for bar in bars:
+                h = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width() / 2.0, h + 0.5, f"{int(h)}", ha="center", va="bottom", fontsize=8)
+        ax.set_xticks(x + 0.25 * max(len(dataset_items) - 1, 0) / 2.0)
+        ax.set_xticklabels(labels)
+        ax.set_xlabel("Class")
+        ax.set_ylabel("Number of cases")
+        ax.set_title("Class Distribution")
+        ax.legend(frameon=False)
+        ax.grid(axis="y", alpha=0.25)
+    else:
+        fig, axes = plt.subplots(1, 2, figsize=(11.0, 4.8), sharey=True)
+        for ax, (name, counts) in zip(axes, dataset_items):
+            counts = np.asarray(counts, dtype=int)
+            x = np.arange(len(labels), dtype=float)
+            bars = ax.bar(x, counts, width=0.62, color="#4C78A8", alpha=0.9)
+            for bar in bars:
+                h = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width() / 2.0, h + 0.5, f"{int(h)}", ha="center", va="bottom", fontsize=8)
+
+            ax.set_xticks(x)
+            ax.set_xticklabels(labels)
+            ax.set_xlabel("Class")
+            ax.set_title(name)
+            ax.grid(axis="y", alpha=0.25)
+
+        axes[0].set_ylabel("Number of cases")
+        fig.suptitle("Class Distribution: Train (left) vs Test (right)")
+
+    fig.tight_layout()
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    fig.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
 #----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # Dataset loading and splitting
 #----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 train_dataset = load_dataset("csv", data_files={"train": TRAIN_FILE})["train"]
-test_dataset = load_dataset("csv", data_files={"test": TEST_FILE}, sep=";", encoding="utf-8")["test"]
+test_dataset = load_dataset("csv", data_files={"test": TEST_FILE}, sep="\t", encoding="utf-8")["test"]
+
+# Paper artifacts: dataset class distribution and role-wise text statistics.
+train_class_counts_full = np.bincount(np.asarray(train_dataset["labels"], dtype=np.int64), minlength=3).astype(int)
+test_class_counts_full = np.bincount(hamd_to_three_classes(test_dataset["hamd_sum"]), minlength=3).astype(int)
+
+class_distribution = {
+    "Train": train_class_counts_full,
+    "Test": test_class_counts_full,
+}
+save_class_distribution_plot(class_distribution, DATA_DISTRIBUTION_PLOT_PATH)
+print(f"Saved dataset class distribution plot: {DATA_DISTRIBUTION_PLOT_PATH}")
+
+role_stats_rows = []
+role_stats_rows.extend(build_role_stats_rows("Train", train_dataset["text"]))
+role_stats_rows.extend(build_role_stats_rows("Test", test_dataset["text"]))
+save_role_stats_csv(ROLE_STATS_CSV_PATH, role_stats_rows)
+print(f"Saved role word/token table CSV: {ROLE_STATS_CSV_PATH}")
 
 train_dataset = train_dataset.select_columns(["text", "labels"])
 
@@ -248,7 +437,6 @@ class CustomBERTModel(nn.Module):
         self.dropout = nn.Dropout(DROPOUT_RATE)
         self.classifier = nn.Linear(self.config.hidden_size, NUM_CLASSES)
         self.register_buffer("class_weights", torch.tensor(class_weights, dtype=torch.float32))
-        self.register_buffer("class_score_anchors", torch.tensor(CLASS_SCORE_ANCHORS, dtype=torch.float32))
 
         if freeze_bottom_layers > 0:
             for param in self.encoder.embeddings.parameters():
@@ -310,8 +498,6 @@ class CustomBERTModel(nn.Module):
                 chunk_idx += num_chunks
 
             subject_logits = torch.stack(subject_logits_list)
-            subject_probs = torch.softmax(subject_logits, dim=-1)
-            subject_scores = torch.sum(subject_probs * self.class_score_anchors.unsqueeze(0), dim=-1)
 
             if labels is not None:
                 subject_labels = torch.stack(subject_labels_list).long()
@@ -319,30 +505,24 @@ class CustomBERTModel(nn.Module):
                 return {
                     "loss": loss,
                     "logits": subject_logits,
-                    "depression_score": subject_scores,
                 }
 
             return {
                 "logits": subject_logits,
-                "depression_score": subject_scores,
             }
 
         outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
         cls_embedding = self.dropout(outputs.last_hidden_state[:, 0, :])
         chunk_logits = self.classifier(cls_embedding)
-        chunk_probs = torch.softmax(chunk_logits, dim=-1)
-        chunk_scores = torch.sum(chunk_probs * self.class_score_anchors.unsqueeze(0), dim=-1)
         if labels is not None:
             labels = labels.long()
             loss = self._classification_loss(chunk_logits, labels)
             return {
                 "loss": loss,
                 "logits": chunk_logits,
-                "depression_score": chunk_scores,
             }
         return {
             "logits": chunk_logits,
-            "depression_score": chunk_scores,
         }
 
 
@@ -399,13 +579,6 @@ class SubjectChunkingCollator:
 # Metrics and Prediction Helpers
 #----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-def extract_pred_scores(predictions):
-    """Trainer predictions can be an array or tuple; take logits/scores consistently."""
-    if isinstance(predictions, (tuple, list)):
-        predictions = predictions[0]
-    return logits_to_scores(predictions)
-
-
 def extract_pred_classes(predictions):
     if isinstance(predictions, (tuple, list)):
         predictions = predictions[0]
@@ -413,6 +586,18 @@ def extract_pred_classes(predictions):
     if logits.ndim == 1:
         logits = logits.reshape(-1, NUM_CLASSES)
     return np.argmax(logits, axis=1).astype(np.int64)
+
+
+def extract_pred_probabilities(predictions):
+    if isinstance(predictions, (tuple, list)):
+        predictions = predictions[0]
+    logits = np.asarray(predictions, dtype=float)
+    if logits.ndim == 1:
+        logits = logits.reshape(-1, NUM_CLASSES)
+    shifted = logits - np.max(logits, axis=1, keepdims=True)
+    exp_logits = np.exp(shifted)
+    probs = exp_logits / np.clip(np.sum(exp_logits, axis=1, keepdims=True), 1e-8, None)
+    return probs
 
 
 def compute_metrics(eval_pred):
@@ -435,25 +620,6 @@ def _model_dir_has_weights(model_dir):
         or os.path.isfile(os.path.join(model_dir, "pytorch_model.bin"))
     )
     return has_config and has_weights
-
-
-def _latest_checkpoint_dir(output_dir):
-    if not os.path.isdir(output_dir):
-        return None
-    candidates = []
-    for name in os.listdir(output_dir):
-        path = os.path.join(output_dir, name)
-        if not (name.startswith("checkpoint-") and os.path.isdir(path)):
-            continue
-        try:
-            step = int(name.split("-")[-1])
-        except ValueError:
-            continue
-        if os.path.isfile(os.path.join(path, "model.safetensors")) or os.path.isfile(os.path.join(path, "pytorch_model.bin")):
-            candidates.append((step, path))
-    if not candidates:
-        return None
-    return max(candidates, key=lambda x: x[0])[1]
 
 
 def _load_checkpoint_into_model(model, checkpoint_dir):
@@ -484,7 +650,6 @@ def tokenize_mlm(examples):
 
 mlm_args = TrainingArguments(
     output_dir=OUTPUT_DIR,
-    logging_dir=LOGGING_DIR,
     per_device_train_batch_size=16,
     num_train_epochs=1,
     learning_rate=1e-5,
@@ -497,20 +662,6 @@ mlm_args = TrainingArguments(
     data_seed=SEED,
 )
 
-print(
-    "Effective BERT params: "
-    f"lr={training_args.learning_rate}, warmup_ratio={training_args.warmup_ratio}, "
-    f"epochs={training_args.num_train_epochs}, weight_decay={training_args.weight_decay}, "
-    f"batch={training_args.per_device_train_batch_size}",
-    flush=True,
-)
-print(
-    "Effective MLM params: "
-    f"lr={mlm_args.learning_rate}, warmup_steps={mlm_args.warmup_steps}, "
-    f"epochs={mlm_args.num_train_epochs}, weight_decay={mlm_args.weight_decay}, "
-    f"batch={mlm_args.per_device_train_batch_size}",
-    flush=True,
-)
 
 domain_model_ready = _model_dir_has_weights(DOMAIN_ADAPTED_MODEL_DIR)
 if domain_model_ready:
@@ -676,39 +827,81 @@ if did_train_classifier and best_ckpt is not None:
 # Predict on test set (subject-level, no pre-chunking needed)
 predictions = trainer.predict(dataset["test"])
 
-test_scores = extract_pred_scores(predictions.predictions)
 test_pred_classes = extract_pred_classes(predictions.predictions)
+test_pred_probs = extract_pred_probabilities(predictions.predictions)
 
-# EPI test: convert HAM-D to 3 classes (0-7: none, 8-23: moderate, 24+: severe)
-if "hamd_sum" in dataset["test"].column_names:
-    hamd_true = np.asarray(dataset["test"]["hamd_sum"], dtype=float)
-    hamd_true_classes = np.where(hamd_true <= 7, 0, np.where(hamd_true <= 23, 1, 2)).astype(np.int64)
+def parse_session_labels(session_ids):
+    session_labels = []
+    for raw_id in session_ids:
+        raw_id = str(raw_id)
+        if "-" in raw_id:
+            _, session_label = raw_id.rsplit("-", 1)
+            session_labels.append(session_label)
+        else:
+            session_labels.append("unknown")
+    return session_labels
 
-    test_acc = float(np.mean(test_pred_classes == hamd_true_classes))
-    test_bal_acc = balanced_accuracy(hamd_true_classes, test_pred_classes)
-    test_macro_f1 = float(f1_score(hamd_true_classes, test_pred_classes, average="macro", zero_division=0))
 
+if "target_class" in dataset["test"].column_names:
+    test_true_classes = np.asarray(dataset["test"]["target_class"], dtype=np.int64)
+elif "labels" in dataset["test"].column_names:
+    test_true_classes = np.asarray(dataset["test"]["labels"], dtype=np.int64)
+elif "hamd_sum" in dataset["test"].column_names:
+    # Preserve original EPI holdout evaluation: convert HAM-D sum to 3 classes.
+    hamd_values = np.asarray(dataset["test"]["hamd_sum"], dtype=float)
+    test_true_classes = hamd_to_three_classes(hamd_values)
+else:
+    test_true_classes = None
 
-    pearson_test = pearsonr(test_scores, hamd_true)
-    rho_hamd = float(pearson_test.statistic)
-    p_hamd = float(pearson_test.pvalue)
-    if np.isnan(rho_hamd):
-        rho_hamd = 0.0
-    if np.isnan(p_hamd):
-        p_hamd = 1.0
+if test_true_classes is not None:
+    test_acc = float(np.mean(test_pred_classes == test_true_classes))
+    test_bal_acc = balanced_accuracy(test_true_classes, test_pred_classes)
+    test_macro_f1 = float(f1_score(test_true_classes, test_pred_classes, average="macro", zero_division=0))
+
+    try:
+        test_roc_auc_ovr_macro = float(
+            roc_auc_score(
+                test_true_classes,
+                test_pred_probs,
+                multi_class="ovr",
+                average="macro",
+                labels=[0, 1, 2],
+            )
+        )
+    except ValueError:
+        test_roc_auc_ovr_macro = float("nan")
+
+    per_class_auc = {}
+    for class_id in [0, 1, 2]:
+        y_true_bin = (test_true_classes == class_id).astype(np.int64)
+        if int(np.sum(y_true_bin == 1)) == 0 or int(np.sum(y_true_bin == 0)) == 0:
+            per_class_auc[class_id] = float("nan")
+        else:
+            per_class_auc[class_id] = float(roc_auc_score(y_true_bin, test_pred_probs[:, class_id]))
+
+    class_counts = np.bincount(test_true_classes, minlength=3).astype(int)
 
     print("\n" + "="*60)
-    print("TEST EVALUATION (EPI HOLDOUT)")
+    print("TEST EVALUATION (CLASSIFICATION ONLY)")
     print("="*60)
     print(f"Accuracy:          {test_acc:.4f}")
     print(f"Balanced Accuracy: {test_bal_acc:.4f}")
     print(f"Macro F1:          {test_macro_f1:.4f}")
-    print(f"Rho (Pearson, continuous vs HAM-D): {rho_hamd:.4f}")
-    print(f"p-value:           {p_hamd:.4g}")
+    if np.isnan(test_roc_auc_ovr_macro):
+        print("ROC AUC (macro OVR): unavailable (needs all classes in holdout labels)")
+    else:
+        print(f"ROC AUC (macro OVR): {test_roc_auc_ovr_macro:.4f}")
+    for class_id in [0, 1, 2]:
+        auc_val = per_class_auc[class_id]
+        if np.isnan(auc_val):
+            print(f"ROC AUC class {class_id} vs rest: unavailable")
+        else:
+            print(f"ROC AUC class {class_id} vs rest: {auc_val:.4f}")
 
-    test_cm = confusion_matrix(hamd_true_classes, test_pred_classes, labels=[0, 1, 2])
+    test_cm = confusion_matrix(test_true_classes, test_pred_classes, labels=[0, 1, 2])
     print("Confusion Matrix (rows=true, cols=pred):")
     print(test_cm)
+
     if SAVE_PLOTS:
         fig, ax = plt.subplots(figsize=(5, 4))
         im = ax.imshow(test_cm, cmap="Blues")
@@ -716,7 +909,7 @@ if "hamd_sum" in dataset["test"].column_names:
         ax.set_xticklabels(["none", "moderate", "severe"])
         ax.set_yticklabels(["none", "moderate", "severe"])
         ax.set_xlabel("Predicted"); ax.set_ylabel("True")
-        ax.set_title("Test Confusion Matrix (EPI)")
+        ax.set_title("Test Confusion Matrix")
         for i in range(3):
             for j in range(3):
                 ax.text(j, i, str(test_cm[i, j]), ha="center", va="center")
@@ -727,389 +920,63 @@ if "hamd_sum" in dataset["test"].column_names:
         plt.close()
         print(f"Saved test confusion matrix: {test_cm_path}")
 
-else:
-    print("\nHAM-D column not found in test set; skipped test evaluation.")
-
-
-def parse_subject_and_session_ids(session_ids):
-    subject_ids = []
-    session_labels = []
-    for raw_id in session_ids:
-        raw_id = str(raw_id)
-        if "-" in raw_id:
-            subject_id, session_label = raw_id.rsplit("-", 1)
-            session_label = f"-{session_label}"
-        else:
-            subject_id = raw_id
-            session_label = "unknown"
-        subject_ids.append(subject_id)
-        session_labels.append(session_label)
-    return subject_ids, session_labels
-
-
-def parse_subject_and_session_numbers(session_ids):
-    subject_ids = []
-    session_numbers = []
-    for raw_id in session_ids:
-        raw_id = str(raw_id)
-        if "-" in raw_id:
-            subject_id, session_str = raw_id.rsplit("-", 1)
-            try:
-                session_num = int(session_str)
-            except ValueError:
-                session_num = None
-        else:
-            subject_id = raw_id
-            session_num = None
-        subject_ids.append(subject_id)
-        session_numbers.append(session_num)
-    return subject_ids, session_numbers
-
-
-def significance_stars(p_value):
-    if p_value < 0.001:
-        return "***"
-    if p_value < 0.01:
-        return "**"
-    if p_value < 0.05:
-        return "*"
-    return "ns"
-
-
-def trajectory_agreement_metrics(y_pred_score, y_true):
-
-    y_pred_score = np.asarray(y_pred_score, dtype=float).reshape(-1)
-    y_true = np.asarray(y_true, dtype=float).reshape(-1)
-
-    if y_pred_score.size < 2 or y_true.size < 2:
-        return 0.5, 0.0, 0.5
-
-    # Spearman captures monotonic shape agreement and is invariant to scale.
-    if float(np.ptp(y_pred_score)) == 0.0 or float(np.ptp(y_true)) == 0.0:
-        spearman_rho = 0.0
-    else:
-        s_res = spearmanr(y_pred_score, y_true)
-        spearman_rho = float(s_res.statistic) if s_res is not None else np.nan
-    if np.isnan(spearman_rho):
-        spearman_rho = 0.0
-
-    # Direction agreement checks whether up/down changes match between sessions.
-    d_pred = np.diff(y_pred_score)
-    d_true = np.diff(y_true)
-    if d_pred.size == 0:
-        direction_acc = 0.5
-    else:
-        near_zero = 1e-12
-        pred_sign = np.where(np.abs(d_pred) <= near_zero, 0, np.sign(d_pred))
-        true_sign = np.where(np.abs(d_true) <= near_zero, 0, np.sign(d_true))
-        direction_acc = float(np.mean(pred_sign == true_sign))
-
-    # Weighted blend: rank-shape agreement + directional consistency.
-    tas = 0.7 * ((spearman_rho + 1.0) / 2.0) + 0.3 * direction_acc
-    tas = float(np.clip(tas, 0.0, 1.0))
-
-    return tas, spearman_rho, direction_acc
-
-
-def save_session_grouped_epi_scatter(x_values, y_values, groups, output_path, title, x_label):
-    unique_groups = sorted(set(groups))
-    cmap = plt.get_cmap("tab10", max(len(unique_groups), 1))
-    x_values = np.asarray(x_values, dtype=float)
-    y_values = np.asarray(y_values, dtype=float)
-    x_range = float(np.ptp(x_values)) if len(x_values) else 0.0
-    y_range = float(np.ptp(y_values)) if len(y_values) else 0.0
-
-    fig, ax = plt.subplots(figsize=(11, 7))
-    for idx, group in enumerate(unique_groups):
-        mask = np.asarray([g == group for g in groups], dtype=bool)
-        color = cmap(idx)
-        group_x = x_values[mask]
-        group_y = y_values[mask]
-
-        mean_x = float(np.mean(group_x))
-        mean_y = float(np.mean(group_y))
-        spread_x = float(np.std(group_x))
-        spread_y = float(np.std(group_y))
-        ellipse_width = max(2.0 * spread_x, 0.06 * max(x_range, 1e-6))
-        ellipse_height = max(2.0 * spread_y, 0.08 * max(y_range, 1.0))
-
-        ellipse = Ellipse(
-            (mean_x, mean_y),
-            width=ellipse_width,
-            height=ellipse_height,
-            facecolor=color,
-            edgecolor=color,
-            linewidth=1.2,
-            linestyle="--",
-            alpha=0.14,
-            zorder=1,
-        )
-        ax.add_patch(ellipse)
-
-        ax.scatter(
-            group_x,
-            group_y,
-            alpha=0.82,
-            s=46,
-            color=color,
-            edgecolors="white",
-            linewidths=0.6,
-            label=group,
-            zorder=2,
-        )
-        ax.scatter(
-            [mean_x],
-            [mean_y],
-            s=110,
-            color=color,
-            edgecolors="black",
-            linewidths=0.9,
-            zorder=3,
-        )
-        ax.annotate(
-            group,
-            (mean_x, mean_y),
-            xytext=(5, 5),
-            textcoords="offset points",
-            fontsize=9,
-            weight="bold",
-            color=color,
-            zorder=4,
-        )
-
-    if len(x_values) >= 2 and float(np.ptp(x_values)) > 0.0:
-        fit = np.polyfit(x_values, y_values, 1)
-        x_line = np.linspace(float(np.min(x_values)), float(np.max(x_values)), 100)
-        y_line = fit[0] * x_line + fit[1]
-        ax.plot(x_line, y_line, linestyle="--", color="black", linewidth=1.5, alpha=0.8)
-
-    ax.set_xlabel(x_label)
-    ax.set_ylabel("True HAM-D sum")
-    ax.set_title(title)
-    ax.grid(alpha=0.25)
-    ax.legend(
-        title="Session",
-        bbox_to_anchor=(1.02, 1.0),
-        loc="upper left",
-        borderaxespad=0.0,
-        frameon=False,
-        fontsize=8,
-    )
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=180, bbox_inches="tight")
-    plt.close(fig)
-
-
-def save_session_cloud_grid(x_values, y_values, groups, output_path, title, x_label):
-    """One scatter subplot per session group."""
-    x_values = np.asarray(x_values, dtype=float)
-    y_values = np.asarray(y_values, dtype=float)
-    groups = list(groups)
-    unique_groups = sorted(set(groups))
-    if not unique_groups:
-        return 0
-
-    n_panels = len(unique_groups)
-    ncols = min(4, n_panels)
-    nrows = int(np.ceil(n_panels / ncols))
-
-    fig, axes = plt.subplots(nrows, ncols, figsize=(4.2 * ncols, 3.4 * nrows), squeeze=False)
-    x_min = float(np.min(x_values)) if x_values.size else 0.0
-    x_max = float(np.max(x_values)) if x_values.size else 1.0
-    y_min = float(np.min(y_values)) if y_values.size else 0.0
-    y_max = float(np.max(y_values)) if y_values.size else 1.0
-
-    for plot_i, group in enumerate(unique_groups):
-        r, c = divmod(plot_i, ncols)
-        ax = axes[r][c]
-        mask = np.asarray([g == group for g in groups], dtype=bool)
-        gx = x_values[mask]
-        gy = y_values[mask]
-
-        ax.scatter(gx, gy, alpha=0.78, s=28, color="#2F6DB0", edgecolors="white", linewidths=0.4)
-        if gx.size >= 2 and float(np.ptp(gx)) > 0.0:
-            fit = np.polyfit(gx, gy, 1)
-            x_line = np.linspace(float(np.min(gx)), float(np.max(gx)), 100)
-            y_line = fit[0] * x_line + fit[1]
-            ax.plot(x_line, y_line, linestyle="--", color="black", linewidth=1.0, alpha=0.75)
-
-        ax.set_title(f"Session {group} (n={gx.size})", fontsize=9)
-        ax.set_xlim(x_min, x_max)
-        ax.set_ylim(y_min, y_max)
-        ax.grid(alpha=0.2)
-        if r == nrows - 1:
-            ax.set_xlabel(x_label)
-        if c == 0:
-            ax.set_ylabel("True HAM-D sum")
-
-    for j in range(n_panels, nrows * ncols):
-        r, c = divmod(j, ncols)
-        axes[r][c].axis("off")
-
-    fig.suptitle(title, y=1.01)
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=180, bbox_inches="tight")
-    plt.close(fig)
-    return n_panels
-
-
-def save_subject_trajectory_grid(session_ids, pred_scores, hamd_values, output_path):
-    pred_scores = np.asarray(pred_scores, dtype=float)
-    hamd_values = np.asarray(hamd_values, dtype=float)
-    subject_ids, session_numbers = parse_subject_and_session_numbers(session_ids)
-    subject_ids = np.asarray(subject_ids)
-    session_numbers = np.asarray(session_numbers, dtype=object)
-
-    candidates = []
-    for subj in sorted(set(subject_ids.tolist())):
-        idx = np.where(subject_ids == subj)[0]
-        sess = session_numbers[idx]
-        valid = [x for x in sess if isinstance(x, int)]
-        if len(valid) >= 2 and len(set(valid)) >= 2:
-            candidates.append((subj, idx))
-
-    if not candidates:
-        return 0
-
-    n_subj = len(candidates)
-    ncols = min(4, n_subj)
-    nrows = int(np.ceil(n_subj / ncols))
-    fig, axes = plt.subplots(nrows, ncols, figsize=(4.2 * ncols, 3.0 * nrows), squeeze=False)
-
-    for plot_i, (subj, idx) in enumerate(candidates):
-        r, c = divmod(plot_i, ncols)
-        ax = axes[r][c]
-
-        sess_nums = session_numbers[idx]
-        order = np.argsort([s if isinstance(s, int) else 10**9 for s in sess_nums])
-        idx_sorted = idx[order]
-
-        x = np.asarray([int(session_numbers[i]) for i in idx_sorted], dtype=int)
-        y_true = hamd_values[idx_sorted]
-        y_pred_score = pred_scores[idx_sorted]
-
-        ax.plot(x, y_true, marker="o", color="#1F7FE6", linewidth=1.8, label="True HAM-D")
-        ax2 = ax.twinx()
-        ax2.plot(x, y_pred_score, marker="s", color="#D17A22", linestyle="--", linewidth=1.8, label="Pred score (0-1)")
-
-        tas, _, _ = trajectory_agreement_metrics(y_pred_score, y_true)
-        ax.set_title(f"{subj} | TAS={tas:.2f}", fontsize=9)
-        ax.set_xticks(x.tolist())
-        ax.set_xlabel("Session")
-        ax.set_ylabel("True HAM-D")
-        span_true = float(np.ptp(y_true))
-        pad_true = max(1.0, 0.15 * span_true)
-        y_true_low = max(0.0, float(np.min(y_true)) - pad_true)
-        y_true_high = float(np.max(y_true)) + pad_true
-        if y_true_high - y_true_low < 2.0:
-            center_true = 0.5 * (float(np.min(y_true)) + float(np.max(y_true)))
-            y_true_low = max(0.0, center_true - 1.0)
-            y_true_high = center_true + 1.0
-        if y_true_high <= y_true_low:
-            y_true_low, y_true_high = 0.0, 1.0
-        ax.set_ylim(y_true_low, y_true_high)
-
-        ax2.set_ylabel("Pred score (0-1)")
-        span_pred = float(np.ptp(y_pred_score))
-        pad_pred = max(0.02, 0.2 * span_pred)
-        y_pred_low = max(0.0, float(np.min(y_pred_score)) - pad_pred)
-        y_pred_high = min(1.0, float(np.max(y_pred_score)) + pad_pred)
-        if y_pred_high - y_pred_low < 0.08:
-            center_pred = 0.5 * (float(np.min(y_pred_score)) + float(np.max(y_pred_score)))
-            y_pred_low = max(0.0, center_pred - 0.04)
-            y_pred_high = min(1.0, center_pred + 0.04)
-        if y_pred_high <= y_pred_low:
-            y_pred_low, y_pred_high = 0.0, 1.0
-        ax2.set_ylim(y_pred_low, y_pred_high)
-
-        ax.grid(alpha=0.2)
-        if plot_i == 0:
-            h1, l1 = ax.get_legend_handles_labels()
-            h2, l2 = ax2.get_legend_handles_labels()
-            ax.legend(h1 + h2, l1 + l2, fontsize=8, loc="best")
-
-    for j in range(n_subj, nrows * ncols):
-        r, c = divmod(j, ncols)
-        axes[r][c].axis("off")
-
-    fig.suptitle("Subject Trajectories (subjects with >=2 sessions) | dual y-axis with per-panel zoom", y=0.99)
-    fig.text(
-        0.5,
-        0.01,
-        "TAS (0-1): higher = better trajectory match; combines rank-shape agreement and up/down change consistency, independent of absolute scale.",
-        ha="center",
-        va="bottom",
-        fontsize=8,
-        color="#444444",
-    )
-    fig.tight_layout(rect=[0, 0.04, 1, 0.97])
-    fig.savefig(output_path, dpi=180, bbox_inches="tight")
-    plt.close(fig)
-
-    return n_subj
-
-
-if "hamd_sum" in dataset["test"].column_names:
     write_overall_metrics_csv(
         OVERALL_METRICS_CSV_PATH,
         {
             "accuracy": test_acc,
             "balanced_accuracy": test_bal_acc,
             "macro_f1": test_macro_f1,
-            "rho_pearson": rho_hamd,
-            "p_value": p_hamd,
+            "roc_auc_ovr_macro": test_roc_auc_ovr_macro,
             "confusion_matrix": str(test_cm.tolist()),
         },
     )
     print(f"Saved overall metrics CSV: {OVERALL_METRICS_CSV_PATH}")
 
+    auc_rows = []
+    for class_id in [0, 1, 2]:
+        auc_rows.append(
+            {
+                "class_id": class_id,
+                "class_count": int(class_counts[class_id]),
+                "auc_ovr": per_class_auc[class_id],
+                "macro_auc_ovr": test_roc_auc_ovr_macro,
+            }
+        )
+    write_auc_details_csv(AUC_DETAILS_CSV_PATH, auc_rows)
+    print(f"Saved AUC details CSV: {AUC_DETAILS_CSV_PATH}")
+
     if "session_id" in dataset["test"].column_names:
-        session_ids = dataset["test"]["session_id"]
-        _, session_labels = parse_subject_and_session_ids(session_ids)
+        session_labels = parse_session_labels(dataset["test"]["session_id"])
 
         write_per_session_metrics_csv(
             PER_SESSION_METRICS_CSV_PATH,
             session_labels=session_labels,
-            true_classes=hamd_true_classes,
+            true_classes=test_true_classes,
             pred_classes=test_pred_classes,
         )
         print(f"Saved per-session metrics CSV: {PER_SESSION_METRICS_CSV_PATH}")
 
         if SAVE_PLOTS:
-            session_plot_path = os.path.join(PERFORMANCE_DIR, "epi_hamd_scatter_by_session.png")
-            save_session_grouped_epi_scatter(
-                x_values=np.asarray(test_scores, dtype=float),
-                y_values=np.asarray(hamd_true, dtype=float),
-                groups=session_labels,
-                output_path=session_plot_path,
-                title=f"EPI: Predicted continuous score (0-1) vs True HAM-D by session  (rho={rho_hamd:.3f}, p={p_hamd:.3g})",
-                x_label="Predicted continuous score (0-1)",
+            roc_path = os.path.join(PERFORMANCE_DIR, "epi_roc_ovr_all_classes.png")
+            class_aucs_for_plot = save_ovr_roc_panel(
+                y_true=test_true_classes,
+                y_scores=test_pred_probs,
+                macro_auc=test_roc_auc_ovr_macro if not np.isnan(test_roc_auc_ovr_macro) else float("nan"),
+                output_path=roc_path,
             )
-            print(f"Saved EPI session scatter plot: {session_plot_path}")
-
-            session_grid_path = os.path.join(PERFORMANCE_DIR, "epi_hamd_cloud_grid_by_session.png")
-            n_session_panels = save_session_cloud_grid(
-                x_values=np.asarray(test_scores, dtype=float),
-                y_values=np.asarray(hamd_true, dtype=float),
-                groups=session_labels,
-                output_path=session_grid_path,
-                title="EPI: Predicted continuous score (0-1) vs True HAM-D per session",
-                x_label="Predicted continuous score (0-1)",
-            )
-            if n_session_panels > 0:
-                print(f"Saved EPI session cloud grid ({n_session_panels} panels): {session_grid_path}")
-
-            trajectory_grid_path = os.path.join(PERFORMANCE_DIR, "epi_subject_trajectories_grid.png")
-            n_traj_subjects = save_subject_trajectory_grid(
-                session_ids=session_ids,
-                pred_scores=np.asarray(test_scores, dtype=float),
-                hamd_values=np.asarray(hamd_true, dtype=float),
-                output_path=trajectory_grid_path,
-            )
-            if n_traj_subjects > 0:
-                print(f"Saved subject trajectory grid ({n_traj_subjects} subjects): {trajectory_grid_path}")
-            else:
-                print("Skipped trajectory grid: no subjects with >=2 valid sessions in current test file.")
+            print(f"Saved combined ROC panel: {roc_path}")
+            for class_id, auc_val in class_aucs_for_plot.items():
+                if np.isnan(auc_val):
+                    print(f"Class {class_id} ROC AUC: unavailable")
+                else:
+                    print(f"Class {class_id} ROC AUC: {auc_val:.4f}")
+else:
+    available_test_columns = ", ".join(dataset["test"].column_names)
+    print(
+        "\nNo test class labels found. Predicted classes were generated, "
+        "but classification metrics and label-based plots were skipped. "
+        f"Expected 'target_class', 'labels', or 'hamd_sum'. Found columns: [{available_test_columns}]"
+    )
 
 
 

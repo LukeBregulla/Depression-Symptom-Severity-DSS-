@@ -4,17 +4,13 @@
 /pipeline/learning_results/best_model/
 /pipeline/learning_results/domain_adapted_bert/
 
-/pipeline/learning_results_boundary/best_model/
-/pipeline/learning_results_boundary/domain_adapted_bert/
+/pipeline/learning_results_V12/best_model/
+/pipeline/learning_results_V12/domain_adapted_bert/
 
 /pipeline/learning_results_llm/best_model/
 /pipeline/learning_results_llm/domain_adapted_bert/
 
-/pipeline/learning_results_treatment/best_model/
-/pipeline/learning_results_treatment/domain_adapted_bert/
 
-
-/pipeline/translate.py
 
 # Caches and temp
 **/__pycache__/
