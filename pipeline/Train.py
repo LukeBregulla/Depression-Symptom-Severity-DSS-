@@ -34,26 +34,21 @@ if torch.cuda.is_available():
 
 # Data Loading
 TRAIN_FILE = "/zi/home/luke.bregulla/Desktop/DSS/data/data_daic_pdch_3class_texts.csv"
-TEST_FILE = "/zi/home/luke.bregulla/Desktop/DSS/data/data_epi_en_V12.csv"
 
-OUTPUT_DIR = "/zi/home/luke.bregulla/Desktop/DSS/pipeline/learning_results_V12"
-LOGGING_DIR = "/zi/home/luke.bregulla/Desktop/DSS/pipeline/learning_results_V12/logs"
-PERFORMANCE_DIR = "/zi/home/luke.bregulla/Desktop/DSS/pipeline/learning_results_V12/performance_plots"
-OVERALL_METRICS_CSV_PATH = os.path.join(OUTPUT_DIR, "epi_holdout_overall_metrics_V12.csv")
-PER_SESSION_METRICS_CSV_PATH = os.path.join(OUTPUT_DIR, "epi_holdout_metrics_by_session_V12.csv")
-AUC_DETAILS_CSV_PATH = os.path.join(OUTPUT_DIR, "epi_holdout_auc_details_V12.csv")
-PER_SUBJECT_PREDICTIONS_CSV_PATH = os.path.join(OUTPUT_DIR, "epi_holdout_subject_predictions_V12.csv")
-F1_VS_CHANCE_PERMUTATION_CSV_PATH = os.path.join(OUTPUT_DIR, "epi_holdout_macro_f1_vs_chance_permutation_V12.csv")
+OUTPUT_DIR = "/zi/home/luke.bregulla/Desktop/DSS/results/Validation"
+LOGGING_DIR = "/zi/home/luke.bregulla/Desktop/DSS/results/Validation/logs"
+PERFORMANCE_DIR = "/zi/home/luke.bregulla/Desktop/DSS/results/Validation/performance_plots"
+VAL_PER_SUBJECT_PREDICTIONS_CSV_PATH = os.path.join(OUTPUT_DIR, "validation_subject_predictions_V12.csv")
 BEST_MODEL_DIR = os.path.join(OUTPUT_DIR, "best_model")
-DATA_DISTRIBUTION_PLOT_PATH = os.path.join(PERFORMANCE_DIR, "dataset_class_distribution_train_test.png")
-ROLE_STATS_CSV_PATH = os.path.join(OUTPUT_DIR, "dataset_role_word_token_stats.csv")
+DATA_DISTRIBUTION_PLOT_PATH = os.path.join(PERFORMANCE_DIR, "training_class_distribution_train.png")
+
 
 os.environ["TENSORBOARD_LOGGING_DIR"] = LOGGING_DIR
 
-# Load tokenizer
+# model specifics
 BASE_MODEL = "FacebookAI/xlm-roberta-base"
 tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
-DOMAIN_ADAPTED_MODEL_DIR = "/zi/home/luke.bregulla/Desktop/DSS/pipeline/learning_results_V12/domain_adapted_bert"
+DOMAIN_ADAPTED_MODEL_DIR = os.path.join(OUTPUT_DIR, "domain_adapted_bert")
 SAVE_PLOTS = True
 
 
@@ -138,11 +133,10 @@ def write_overall_metrics_csv(output_path, metrics_row):
         writer = csv.DictWriter(
             f,
             fieldnames=[
+                "n",
                 "accuracy",
                 "balanced_accuracy",
                 "macro_f1",
-                "roc_auc_ovr_macro",
-                "confusion_matrix",
             ],
         )
         writer.writeheader()
@@ -203,35 +197,33 @@ def write_single_row_csv(output_path, row):
         writer.writerow(row)
 
 
-def write_subject_predictions_csv(output_path, session_labels, true_classes, pred_classes, pred_probs):
+def write_subject_predictions_csv(output_path, row_ids, true_classes, pred_classes, pred_probs):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     pred_probs = np.asarray(pred_probs, dtype=float)
+    if len(row_ids) != len(true_classes):
+        raise ValueError("row_ids length must match true_classes length")
     with open(output_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
             f,
             fieldnames=[
                 "index",
-                "session",
                 "y_true",
                 "y_pred",
                 "p_none",
                 "p_moderate",
                 "p_severe",
-                "correct",
             ],
         )
         writer.writeheader()
-        for i, (sess, y_t, y_p) in enumerate(zip(session_labels, true_classes, pred_classes)):
+        for i, (row_id, y_t, y_p) in enumerate(zip(row_ids, true_classes, pred_classes)):
             writer.writerow(
                 {
-                    "index": int(i),
-                    "session": str(sess),
+                    "index": str(row_id),
                     "y_true": int(y_t),
                     "y_pred": int(y_p),
                     "p_none": float(pred_probs[i, 0]),
                     "p_moderate": float(pred_probs[i, 1]),
                     "p_severe": float(pred_probs[i, 2]),
-                    "correct": int(int(y_t) == int(y_p)),
                 }
             )
 
@@ -245,17 +237,33 @@ def macro_f1_present_labels(y_true, y_pred, label_space=None):
     return float(f1_score(y_true, y_pred, labels=labels.tolist(), average="macro", zero_division=0))
 
 
-def macro_f1_permutation_vs_chance(y_true, y_pred, n_permutations=10000, seed=SEED):
+def macro_f1_permutation_vs_chance(y_true, y_pred, subject_ids=None, n_permutations=10000, seed=SEED):
     y_true = np.asarray(y_true, dtype=np.int64)
     y_pred = np.asarray(y_pred, dtype=np.int64)
-    label_space = np.asarray(np.unique(y_true), dtype=np.int64)
+    if subject_ids is None:
+        subject_ids = np.arange(y_true.size, dtype=np.int64)
+    subject_ids = np.asarray(subject_ids)
+    if subject_ids.size != y_true.size:
+        raise ValueError("subject_ids length must match y_true length")
+
+    label_space = np.unique(y_true)
     observed = macro_f1_present_labels(y_true, y_pred, label_space=label_space)
+
+    unique_subjects, first_idx = np.unique(subject_ids, return_index=True)
+    subject_true = y_true[first_idx]
+    index_by_subject = {sid: np.where(subject_ids == sid)[0] for sid in unique_subjects}
 
     rng = np.random.default_rng(seed)
     perm_scores = np.empty(n_permutations, dtype=float)
     for i in range(n_permutations):
-        y_perm = rng.permutation(y_true)
+        shuffled_subject_true = rng.permutation(subject_true)
+        y_perm = np.empty_like(y_true)
+        for sid, shuffled_label in zip(unique_subjects, shuffled_subject_true):
+            y_perm[index_by_subject[sid]] = shuffled_label
         perm_scores[i] = macro_f1_present_labels(y_perm, y_pred, label_space=label_space)
+
+    null_min = float(np.min(perm_scores))
+    null_max = float(np.max(perm_scores))
 
     p_value_right = float((np.sum(perm_scores >= observed) + 1) / (n_permutations + 1))
     return {
@@ -263,10 +271,15 @@ def macro_f1_permutation_vs_chance(y_true, y_pred, n_permutations=10000, seed=SE
         "observed_macro_f1": observed,
         "null_macro_f1_mean": float(np.mean(perm_scores)),
         "null_macro_f1_std": float(np.std(perm_scores)),
+        "null_macro_f1_min": null_min,
+        "null_macro_f1_max": null_max,
+        "null_macro_f1_range": f"{null_min:.6f} to {null_max:.6f}",
         "p_value_right_tailed": p_value_right,
         "n_permutations": int(n_permutations),
+        "n_subjects": int(unique_subjects.size),
+        "permutation_unit": "subject",
         "label_space": "|".join([str(int(x)) for x in label_space.tolist()]),
-        "note": "Permutation test: labels permuted against fixed predictions; right-tailed p for better-than-chance macro-F1 (using labels present in holdout y_true).",
+        "note": "Permutation test (subject-wise): subject labels are permuted against fixed predictions and broadcast to all sessions of each subject; right-tailed p for better-than-chance macro-F1 on the labels present in the holdout set.",
     }
 
 
@@ -435,49 +448,118 @@ def save_class_distribution_plot(distribution_map, output_path):
     plt.close(fig)
 
 
+def extract_exact_ids(split_dataset, preferred_columns=("id", "session_id", "csv_id")):
+    for col in preferred_columns:
+        if col in split_dataset.column_names:
+            return [str(x) for x in split_dataset[col]]
+    return [str(i) for i in range(len(split_dataset))]
+
+
+def parse_session_labels(session_ids):
+    session_labels = []
+    for raw_id in session_ids:
+        raw_id = str(raw_id)
+        if "-" in raw_id:
+            _, session_label = raw_id.rsplit("-", 1)
+            session_labels.append(session_label)
+        else:
+            session_labels.append("unknown")
+    return session_labels
+
+
+def parse_subject_ids(session_ids):
+    subject_ids = []
+    for raw_id in session_ids:
+        raw_id = str(raw_id)
+        if "-" in raw_id:
+            subject_id, _ = raw_id.rsplit("-", 1)
+            subject_ids.append(subject_id)
+        else:
+            subject_ids.append(raw_id)
+    return subject_ids
+
+
+def session_sort_key(session_label):
+    if session_label is None:
+        return (1, float("inf"), "")
+    s = str(session_label)
+    match = re.search(r"(\d+)", s)
+    if match:
+        return (0, int(match.group(1)), s)
+    return (1, float("inf"), s)
+
+
+def compute_lag1_autocorrelation(subject_ids, session_labels, values):
+    """Lag-1 autocorrelation built from consecutive within-subject sessions."""
+    subject_ids = np.asarray(subject_ids)
+    session_labels = np.asarray(session_labels)
+    values = np.asarray(values, dtype=float)
+
+    if subject_ids.size == 0 or values.size == 0 or subject_ids.size != values.size:
+        return float("nan"), 0
+
+    x_prev = []
+    x_curr = []
+    for sid in np.unique(subject_ids):
+        idx = np.where(subject_ids == sid)[0]
+        if idx.size < 2:
+            continue
+        ordered_idx = sorted(idx.tolist(), key=lambda i: session_sort_key(session_labels[i]))
+        series = values[ordered_idx]
+        x_prev.extend(series[:-1].tolist())
+        x_curr.extend(series[1:].tolist())
+
+    if len(x_prev) < 2:
+        return float("nan"), len(x_prev)
+
+    x_prev = np.asarray(x_prev, dtype=float)
+    x_curr = np.asarray(x_curr, dtype=float)
+    if np.std(x_prev) <= 1e-12 or np.std(x_curr) <= 1e-12:
+        return float("nan"), int(len(x_prev))
+
+    return float(np.corrcoef(x_prev, x_curr)[0, 1]), int(len(x_prev))
+
+
 #----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # Dataset loading and splitting
 #----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 train_dataset = load_dataset("csv", data_files={"train": TRAIN_FILE})["train"]
-test_dataset = load_dataset("csv", data_files={"test": TEST_FILE}, sep="\t", encoding="utf-8")["test"]
 
 # Paper artifacts: dataset class distribution and role-wise text statistics.
-train_class_counts_full = np.bincount(np.asarray(train_dataset["labels"], dtype=np.int64), minlength=3).astype(int)
-test_class_counts_full = np.bincount(hamd_to_three_classes(test_dataset["hamd_sum"]), minlength=3).astype(int)
+train_labels_pre_split = np.asarray(train_dataset["labels"], dtype=np.int64)
+train_class_counts_full = np.bincount(train_labels_pre_split, minlength=3).astype(int)
 
 class_distribution = {
-    "Train": train_class_counts_full,
-    "Test": test_class_counts_full,
+    "Train (full, pre-split)": train_class_counts_full,
 }
 save_class_distribution_plot(class_distribution, DATA_DISTRIBUTION_PLOT_PATH)
 print(f"Saved dataset class distribution plot: {DATA_DISTRIBUTION_PLOT_PATH}")
+print(
+    "Pre-split train class distribution (none / moderate / severe): "
+    f"train={train_class_counts_full.tolist()}"
+)
 
-role_stats_rows = []
-role_stats_rows.extend(build_role_stats_rows("Train", train_dataset["text"]))
-role_stats_rows.extend(build_role_stats_rows("Test", test_dataset["text"]))
-save_role_stats_csv(ROLE_STATS_CSV_PATH, role_stats_rows)
-print(f"Saved role word/token table CSV: {ROLE_STATS_CSV_PATH}")
 
-train_dataset = train_dataset.select_columns(["text", "labels"])
-
-dataset = DatasetDict({"train": train_dataset, "test": test_dataset})
+train_keep_cols = ["text", "labels"]
+if "id" in train_dataset.column_names:
+    train_keep_cols = ["id"] + train_keep_cols
+train_dataset = train_dataset.select_columns(train_keep_cols)
 
 # Split into train(80%) / validation(20%)
 train_indices, val_indices = train_test_split(
-    np.arange(len(dataset["train"])),
+    np.arange(len(train_dataset)),
     test_size=0.2,
-    stratify=np.asarray(dataset["train"]["labels"], dtype=np.int64),
+    stratify=np.asarray(train_dataset["labels"], dtype=np.int64),
     random_state=SEED,
 )
 
 dataset = DatasetDict({
-    "train": dataset["train"].select(train_indices.tolist()),
-    "validation": dataset["train"].select(val_indices.tolist()),
-    "test": dataset["test"],
+    "train": train_dataset.select(train_indices.tolist()),
+    "validation": train_dataset.select(val_indices.tolist()),
 })
 
-print(f"Train rows: {len(dataset['train'])} | Validation rows: {len(dataset['validation'])} | Test rows: {len(dataset['test'])}")
+print(f"Train rows: {len(dataset['train'])} | Validation rows: {len(dataset['validation'])}")
 
 dataset["train"] = dataset["train"].map(lambda x: {"target_class": int(x["labels"])})
 dataset["validation"] = dataset["validation"].map(lambda x: {"target_class": int(x["labels"])})
@@ -488,6 +570,13 @@ print("Split class distribution (none / moderate / severe):")
 for _split, _counts in _split_labels.items():
     print(f"  {_split:>10}: none={_counts[0]}  moderate={_counts[1]}  severe={_counts[2]}  (total={_counts.sum()})")
 
+train_plus_val_counts = _split_labels["train"] + _split_labels["validation"]
+is_split_consistent = bool(np.array_equal(train_plus_val_counts.astype(int), train_class_counts_full.astype(int)))
+print(
+    "Train+validation matches full pre-split train distribution: "
+    f"{is_split_consistent} | combined={train_plus_val_counts.astype(int).tolist()}"
+)
+
 train_classes = np.asarray(dataset["train"]["target_class"], dtype=np.int64)
 class_weights_np, class_counts = build_class_weights(train_classes)
 print("Weighted loss enabled (effective-number weighted cross entropy)")
@@ -496,10 +585,10 @@ print(f"  Class weights [0,1,2]: {[round(float(w), 4) for w in class_weights_np.
 print(f"  EFN beta: {CLASS_BALANCE_BETA} | EFN power: {EFN_WEIGHT_POWER}")
 
 
-
 #----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # Custom Models
 #----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
 
 class CustomBERTModel(nn.Module):
     """Chunk-level <s> encoding + mean pooling + 3-class depression head."""
@@ -750,7 +839,7 @@ domain_model_ready = _model_dir_has_weights(DOMAIN_ADAPTED_MODEL_DIR)
 if domain_model_ready:
     print(f"Skipping MLM warmup: found existing domain-adapted model at {DOMAIN_ADAPTED_MODEL_DIR}")
 else:
-    # Use DAIC training text only for MLM warmup (no EPI text usage here).
+    # Use training text only for MLM warmup (no EPI text usage here).
     daic_text = dataset["train"].remove_columns([c for c in dataset["train"].column_names if c != "text"])
     print(f"samples (DAIC: {len(daic_text)})")
 
@@ -839,7 +928,9 @@ if train_epochs and SAVE_PLOTS:
 # Validation evaluation (subject-level, pure classification metrics)
 val_predictions = trainer.predict(dataset["validation"])
 val_pred_classes = extract_pred_classes(val_predictions.predictions)
+val_pred_probs = extract_pred_probabilities(val_predictions.predictions)
 val_true_classes = np.asarray(dataset["validation"]["target_class"], dtype=np.int64)
+val_row_ids = extract_exact_ids(dataset["validation"], preferred_columns=("id", "session_id", "csv_id"))
 
 val_acc = float(np.mean(val_pred_classes == val_true_classes))
 val_bal_acc = balanced_accuracy(val_true_classes, val_pred_classes)
@@ -874,6 +965,29 @@ print(f"Macro F1:          {val_macro_f1:.4f}")
 val_cm = confusion_matrix(val_true_classes, val_pred_classes, labels=[0, 1, 2])
 print("Confusion Matrix (rows=true, cols=pred):")
 print(val_cm)
+
+write_subject_predictions_csv(
+    VAL_PER_SUBJECT_PREDICTIONS_CSV_PATH,
+    row_ids=val_row_ids,
+    true_classes=val_true_classes,
+    pred_classes=val_pred_classes,
+    pred_probs=val_pred_probs,
+)
+print(f"Saved validation per-subject prediction CSV: {VAL_PER_SUBJECT_PREDICTIONS_CSV_PATH}")
+
+# Save overall validation metrics
+val_overall_metrics_path = os.path.join(OUTPUT_DIR, "validation_overall_metrics.csv")
+write_overall_metrics_csv(
+    val_overall_metrics_path,
+    {
+        "n": len(val_true_classes),
+        "accuracy": val_acc,
+        "balanced_accuracy": val_bal_acc,
+        "macro_f1": val_macro_f1,
+    },
+)
+print(f"Saved validation overall metrics CSV: {val_overall_metrics_path}")
+
 if SAVE_PLOTS:
     fig, ax = plt.subplots(figsize=(5, 4))
     im = ax.imshow(val_cm, cmap="Blues")
@@ -881,16 +995,16 @@ if SAVE_PLOTS:
     ax.set_xticklabels(["none", "moderate", "severe"])
     ax.set_yticklabels(["none", "moderate", "severe"])
     ax.set_xlabel("Predicted"); ax.set_ylabel("True")
-    ax.set_title("in-domain test")
+    ax.set_title("Validation")
     for i in range(3):
         for j in range(3):
             ax.text(j, i, str(val_cm[i, j]), ha="center", va="center")
     plt.colorbar(im, ax=ax)
     plt.tight_layout()
-    val_cm_path = os.path.join(PERFORMANCE_DIR, "in_domain_test_confusion_matrix.png")
+    val_cm_path = os.path.join(PERFORMANCE_DIR, "validation_confusion_matrix.png")
     plt.savefig(val_cm_path, dpi=180)
     plt.close()
-    print(f"Saved in-domain test confusion matrix: {val_cm_path}")
+    print(f"Saved validation confusion matrix: {val_cm_path}")
 
 os.makedirs(PERFORMANCE_DIR, exist_ok=True)
 if did_train_classifier and best_ckpt is not None:
@@ -902,187 +1016,18 @@ if did_train_classifier and best_ckpt is not None:
             shutil.rmtree(ckpt_dir)
             print(f"Deleted: {ckpt_dir}")
 
+# Save the final model properly
+print(f"\nSaving model to: {BEST_MODEL_DIR}")
 
-#----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-# Evaluation on Holdout EPI data
-#----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+# Save full model state (encoder + classifier + dropout)
+import torch
+torch.save({
+    'encoder_state': trainer.model.encoder.state_dict(),
+    'classifier_weight': trainer.model.classifier.weight.data,
+    'classifier_bias': trainer.model.classifier.bias.data,
+    'dropout_rate': DROPOUT_RATE,
+    'num_classes': NUM_CLASSES,
+}, os.path.join(BEST_MODEL_DIR, 'model_weights.pt'))
 
-# Predict on test set (subject-level, no pre-chunking needed)
-predictions = trainer.predict(dataset["test"])
-
-test_pred_classes = extract_pred_classes(predictions.predictions)
-test_pred_probs = extract_pred_probabilities(predictions.predictions)
-
-def parse_session_labels(session_ids):
-    session_labels = []
-    for raw_id in session_ids:
-        raw_id = str(raw_id)
-        if "-" in raw_id:
-            _, session_label = raw_id.rsplit("-", 1)
-            session_labels.append(session_label)
-        else:
-            session_labels.append("unknown")
-    return session_labels
-
-
-if "target_class" in dataset["test"].column_names:
-    test_true_classes = np.asarray(dataset["test"]["target_class"], dtype=np.int64)
-elif "labels" in dataset["test"].column_names:
-    test_true_classes = np.asarray(dataset["test"]["labels"], dtype=np.int64)
-elif "hamd_sum" in dataset["test"].column_names:
-    # Preserve original EPI holdout evaluation: convert HAM-D sum to 3 classes.
-    hamd_values = np.asarray(dataset["test"]["hamd_sum"], dtype=float)
-    test_true_classes = hamd_to_three_classes(hamd_values)
-else:
-    test_true_classes = None
-
-if test_true_classes is not None:
-    test_acc = float(np.mean(test_pred_classes == test_true_classes))
-    test_bal_acc = balanced_accuracy(test_true_classes, test_pred_classes)
-    test_macro_f1 = float(f1_score(test_true_classes, test_pred_classes, average="macro", zero_division=0))
-
-    try:
-        test_roc_auc_ovr_macro = float(
-            roc_auc_score(
-                test_true_classes,
-                test_pred_probs,
-                multi_class="ovr",
-                average="macro",
-                labels=[0, 1, 2],
-            )
-        )
-    except ValueError:
-        test_roc_auc_ovr_macro = float("nan")
-
-    per_class_auc = {}
-    for class_id in [0, 1, 2]:
-        y_true_bin = (test_true_classes == class_id).astype(np.int64)
-        if int(np.sum(y_true_bin == 1)) == 0 or int(np.sum(y_true_bin == 0)) == 0:
-            per_class_auc[class_id] = float("nan")
-        else:
-            per_class_auc[class_id] = float(roc_auc_score(y_true_bin, test_pred_probs[:, class_id]))
-
-    class_counts = np.bincount(test_true_classes, minlength=3).astype(int)
-
-    print("\n" + "="*60)
-    print("TEST EVALUATION (CLASSIFICATION ONLY)")
-    print("="*60)
-    print(f"Accuracy:          {test_acc:.4f}")
-    print(f"Balanced Accuracy: {test_bal_acc:.4f}")
-    print(f"Macro F1:          {test_macro_f1:.4f}")
-    if np.isnan(test_roc_auc_ovr_macro):
-        print("ROC AUC (macro OVR): unavailable (needs all classes in holdout labels)")
-    else:
-        print(f"ROC AUC (macro OVR): {test_roc_auc_ovr_macro:.4f}")
-    for class_id in [0, 1, 2]:
-        auc_val = per_class_auc[class_id]
-        if np.isnan(auc_val):
-            print(f"ROC AUC class {class_id} vs rest: unavailable")
-        else:
-            print(f"ROC AUC class {class_id} vs rest: {auc_val:.4f}")
-
-    per_class_precision = precision_score(test_true_classes, test_pred_classes, labels=[0, 1, 2], average=None, zero_division=0)
-    per_class_recall    = recall_score(test_true_classes, test_pred_classes, labels=[0, 1, 2], average=None, zero_division=0)
-    class_names = ["none", "moderate", "severe"]
-    print("Per-class Precision / Recall:")
-    for class_id, name in enumerate(class_names):
-        print(f"  {name:<10}  precision={per_class_precision[class_id]:.4f}  recall={per_class_recall[class_id]:.4f}")
-
-    test_cm = confusion_matrix(test_true_classes, test_pred_classes, labels=[0, 1, 2])
-    print("Confusion Matrix (rows=true, cols=pred):")
-    print(test_cm)
-
-    if SAVE_PLOTS:
-        fig, ax = plt.subplots(figsize=(5, 4))
-        im = ax.imshow(test_cm, cmap="Blues")
-        ax.set_xticks([0, 1, 2]); ax.set_yticks([0, 1, 2])
-        ax.set_xticklabels(["none", "moderate", "severe"])
-        ax.set_yticklabels(["none", "moderate", "severe"])
-        ax.set_xlabel("Predicted"); ax.set_ylabel("True")
-        ax.set_title("out-of-domain test")
-        for i in range(3):
-            for j in range(3):
-                ax.text(j, i, str(test_cm[i, j]), ha="center", va="center")
-        plt.colorbar(im, ax=ax)
-        plt.tight_layout()
-        test_cm_path = os.path.join(PERFORMANCE_DIR, "test_confusion_matrix.png")
-        plt.savefig(test_cm_path, dpi=180)
-        plt.close()
-        print(f"Saved test confusion matrix: {test_cm_path}")
-
-    write_overall_metrics_csv(
-        OVERALL_METRICS_CSV_PATH,
-        {
-            "accuracy": test_acc,
-            "balanced_accuracy": test_bal_acc,
-            "macro_f1": test_macro_f1,
-            "roc_auc_ovr_macro": test_roc_auc_ovr_macro,
-            "confusion_matrix": str(test_cm.tolist()),
-        },
-    )
-    print(f"Saved overall metrics CSV: {OVERALL_METRICS_CSV_PATH}")
-
-    auc_rows = []
-    for class_id in [0, 1, 2]:
-        auc_rows.append(
-            {
-                "class_id": class_id,
-                "class_count": int(class_counts[class_id]),
-                "auc_ovr": per_class_auc[class_id],
-                "macro_auc_ovr": test_roc_auc_ovr_macro,
-            }
-        )
-    write_auc_details_csv(AUC_DETAILS_CSV_PATH, auc_rows)
-    print(f"Saved AUC details CSV: {AUC_DETAILS_CSV_PATH}")
-
-    if "session_id" in dataset["test"].column_names:
-        session_labels = parse_session_labels(dataset["test"]["session_id"])
-    else:
-        session_labels = ["unknown"] * int(len(test_true_classes))
-
-    write_subject_predictions_csv(
-        PER_SUBJECT_PREDICTIONS_CSV_PATH,
-        session_labels=session_labels,
-        true_classes=test_true_classes,
-        pred_classes=test_pred_classes,
-        pred_probs=test_pred_probs,
-    )
-    print(f"Saved per-subject prediction CSV: {PER_SUBJECT_PREDICTIONS_CSV_PATH}")
-
-    f1_perm_row = macro_f1_permutation_vs_chance(
-        y_true=test_true_classes,
-        y_pred=test_pred_classes,
-        n_permutations=10000,
-        seed=SEED,
-    )
-    write_single_row_csv(F1_VS_CHANCE_PERMUTATION_CSV_PATH, f1_perm_row)
-    print(f"Saved macro-F1 vs chance permutation CSV: {F1_VS_CHANCE_PERMUTATION_CSV_PATH}")
-
-    if "session_id" in dataset["test"].column_names:
-        write_per_session_metrics_csv(
-            PER_SESSION_METRICS_CSV_PATH,
-            session_labels=session_labels,
-            true_classes=test_true_classes,
-            pred_classes=test_pred_classes,
-        )
-        print(f"Saved per-session metrics CSV: {PER_SESSION_METRICS_CSV_PATH}")
-
-        if SAVE_PLOTS:
-            roc_path = os.path.join(PERFORMANCE_DIR, "epi_roc_ovr_all_classes.png")
-            class_aucs_for_plot = save_ovr_roc_panel(
-                y_true=test_true_classes,
-                y_scores=test_pred_probs,
-                macro_auc=test_roc_auc_ovr_macro if not np.isnan(test_roc_auc_ovr_macro) else float("nan"),
-                output_path=roc_path,
-            )
-            print(f"Saved combined ROC panel: {roc_path}")
-else:
-    available_test_columns = ", ".join(dataset["test"].column_names)
-    print(
-        "\nNo test class labels found. Predicted classes were generated, "
-        "but classification metrics and label-based plots were skipped. "
-        f"Expected 'target_class', 'labels', or 'hamd_sum'. Found columns: [{available_test_columns}]"
-    )
-
-
-
+print(f"✓ Model weights saved successfully to: {BEST_MODEL_DIR}")
+print("="*60)

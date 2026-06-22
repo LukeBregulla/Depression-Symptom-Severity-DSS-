@@ -1,14 +1,9 @@
 # Ignore local data and study materials
 /data/
 /Paper/
-/pipeline/learning_results/best_model/
-/pipeline/learning_results/domain_adapted_bert/
+/results/Validation/best_model/
+/results/Validation/domain_adapted_bert/
 
-/pipeline/learning_results_V12/best_model/
-/pipeline/learning_results_V12/domain_adapted_bert/
-
-/pipeline/learning_results_llm/best_model/
-/pipeline/learning_results_llm/domain_adapted_bert/
 
 
 
