@@ -1,0 +1,70 @@
+# Test/Holdout Evaluation Configuration
+# =====================================
+# Modify these settings before running: python pipeline/Test.py
+# All paths are relative to the DSS project root
+
+# ============================================================================
+# TEST DATA
+# ============================================================================
+test_data:
+  file: "data/data_epi_en_V12.csv"
+  sep: "\t" 
+  encoding: "utf-8"
+
+# ============================================================================
+# OUTPUT
+# ============================================================================
+output:
+  directory: "results/V12"  # where to save evaluation results and plots
+  name: "holdout"
+
+# ============================================================================
+# MODEL CONFIGURATION
+# ============================================================================
+model:
+  base_model: "FacebookAI/xlm-roberta-base"
+  domain_adapted_bert_dir: "results/Validation/domain_adapted_bert"  # encoder with config.json
+  best_model_dir: "results/Validation/best_model"  # classifier weights
+  max_length: 512
+  dropout_rate: 0.3
+
+# ============================================================================
+# INFERENCE HYPERPARAMETERS
+# ============================================================================
+inference:
+  batch_size: 16  # per_device_eval_batch_size
+  output_dir: "/tmp/inference"  # temporary inference cache directory
+
+# ============================================================================
+# PLOTTING
+# ============================================================================
+plotting:
+  figure_size: [5, 4]  # [width, height] in inches
+  dpi: 180
+
+# ============================================================================
+# EVALUATION SETTINGS
+# ============================================================================
+evaluation:
+  label_source: "hamd_three_class"  # how to extract labels from test data
+  labels: 3  # number of classes: 3 = [0,1,2] (none/moderate/severe); 2 = [1,2] (moderate/severe); 1 = [0] (single class)
+  seed: 42
+
+
+# ============================================================================
+# QUICK SWITCHES (uncomment the section you want)
+# ============================================================================
+
+# Test on EPI V1 instead of V12:
+# test_data:
+#   file: "data/data_epi_en_V1.csv"
+# output:
+#   directory: "results/V1"
+#   name: "holdout_V1"
+
+# Test on 2-class subset (moderate+severe only):
+# evaluation:
+#   labels: 2
+# output:
+#   directory: "results/2_class"
+#   name: "holdout_2class"
