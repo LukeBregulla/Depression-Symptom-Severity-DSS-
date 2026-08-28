@@ -3,23 +3,13 @@
 /Paper/
 /results/Validation/best_model/
 /results/Validation/domain_adapted_bert/
+/results_new/02_epi/best_model/
+/results_new/03_pdch/best_model/
+/results_new/03_daic/best_model/
+/results_new/03_daic_pdch_epi_2class/best_model/
 
 
 
 
 # Caches and temp
-**/__pycache__/
-**/.ipynb_checkpoints/
-**/.pickle
-**/.pkl
-**/.npz
-**/.npy
-**/.tmp
-**/.log
-**/.pt
-**/.bin
-**/.ckpt
-**/.onnx
-**/.gz
-**/.zip
-**/.DS_Store
+**/
