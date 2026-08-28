@@ -1,5 +1,6 @@
 # Ignore local data and study materials
 /data/
+/data_new/
 /Paper/
 /results/Validation/best_model/
 /results/Validation/domain_adapted_bert/
@@ -12,4 +13,18 @@
 
 
 # Caches and temp
-**/
+**/__pycache__/
+**/.ipynb_checkpoints/
+**/.pickle
+**/.pkl
+**/.npz
+**/.npy
+**/.tmp
+**/.log
+**/.pt
+**/.bin
+**/.ckpt
+**/.onnx
+**/.gz
+**/.zip
+**/.DS_Store
