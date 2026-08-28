@@ -1,0 +1,2 @@
+n_samples,n_mild_moderate,n_severe,macro_f1,balanced_accuracy,precision_mild_moderate,precision_severe,recall_mild_moderate,recall_severe,roc_auc_severe,average_precision_severe,perm_observed_macro_f1,perm_null_macro_f1_mean,perm_p_value,perm_n_permutations
+91,71,20,0.4382716049382716,0.5,0.7802197802197802,0.0,1.0,0.0,0.6704225352112676,0.4292302153943306,0.4382716049382716,0.43827160493827166,1.0,10000
