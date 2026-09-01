@@ -1,6 +1,7 @@
 # Ignore local data and study materials
 /data/
 /data_new/
+/data_ms/
 /Paper/
 /results/Validation/best_model/
 /results/Validation/domain_adapted_bert/
@@ -8,6 +9,10 @@
 /results_new/03_pdch/best_model/
 /results_new/03_daic/best_model/
 /results_new/03_daic_pdch_epi_2class/best_model/
+/results_ms/02_epi/best_model/
+/results_ms/03_pdch/best_model/
+/results_ms/03_daic/best_model/
+/results_ms/03_daic_pdch_epi_2class/best_model/
 
 
 

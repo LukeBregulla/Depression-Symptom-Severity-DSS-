@@ -36,8 +36,8 @@ if torch.cuda.is_available():
 
 # Edit stage paths here.
 PROJECT_ROOT = "/zi/home/luke.bregulla/Desktop/DSS"
-EPI_FILE = os.path.join(PROJECT_ROOT, "data_new/data_epi.csv")
-RESULTS_ROOT = os.path.join(PROJECT_ROOT, "results_new/02_epi")
+EPI_FILE = os.path.join(PROJECT_ROOT, "data/data_epi.csv")
+RESULTS_ROOT = os.path.join(PROJECT_ROOT, "results/02_epi")
 TEXT_INPUT = "full_transcript"
 OUTPUT_DIR = RESULTS_ROOT
 BEST_MODEL_DIR = os.path.join(OUTPUT_DIR, "best_model")

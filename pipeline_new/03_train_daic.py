@@ -103,11 +103,11 @@ def reseed() -> None:
 
 PROJECT_ROOT = "/zi/home/luke.bregulla/Desktop/DSS"
 
-PDCH_FILE = os.path.join(PROJECT_ROOT, "data_new/data_pdch.csv")
-DAIC_FILE = os.path.join(PROJECT_ROOT, "data_new/data_daic.csv")
+PDCH_FILE = os.path.join(PROJECT_ROOT, "data/data_pdch.csv")
+DAIC_FILE = os.path.join(PROJECT_ROOT, "data/data_daic.csv")
 # EPI_FILE moved to 04_predict_epi.py
 
-RESULTS_ROOT = os.path.join(PROJECT_ROOT, "results_new/03_daic")
+RESULTS_ROOT = os.path.join(PROJECT_ROOT, "results/03_daic")
 OUTPUT_DIR = RESULTS_ROOT
 LOGGING_DIR = os.path.join(OUTPUT_DIR, "logs")
 BEST_MODEL_DIR = os.path.join(OUTPUT_DIR, "best_model")

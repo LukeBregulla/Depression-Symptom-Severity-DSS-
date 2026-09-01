@@ -21,13 +21,13 @@ plt.rcParams["font.serif"] = ["Georgia", "DejaVu Serif", "Times New Roman", "ser
 
 # Edit stage paths here. This stage evaluates a fresh base model without supervised training.
 PROJECT_ROOT = Path("/zi/home/luke.bregulla/Desktop/DSS")
-TEST_FILE = str(PROJECT_ROOT / "data_new/data_epi.csv")
+TEST_FILE = str(PROJECT_ROOT / "data/data_epi.csv")
 TEST_SEP = "auto"
 TEST_ENCODING = "utf-8"
 TEXT_INPUT = "full_transcript"
 SOURCE_DROPOUT_RATE = 0.3
 TRAIN_OUTPUT_DIR = None
-ZERO_SHOT_OUTPUT_DIR = str(PROJECT_ROOT / "results_new/01_zero_shot_epi")
+ZERO_SHOT_OUTPUT_DIR = str(PROJECT_ROOT / "results/01_zero_shot_epi")
 OUTPUT_NAME = "epi_zero_shot"
 SUBJECT_PREDICTIONS_CSV = os.path.join(ZERO_SHOT_OUTPUT_DIR, "subject_predictions.csv")
 SEVERE_METRICS_CSV = os.path.join(ZERO_SHOT_OUTPUT_DIR, "severe_discrimination_metrics.csv")

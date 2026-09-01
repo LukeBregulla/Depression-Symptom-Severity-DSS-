@@ -1,2 +1,0 @@
-config,efn_weight_power,weight_decay,dropout_rate,cv_macro_f1_mean,cv_macro_f1_std,fold_1_macro_f1,fold_2_macro_f1,fold_3_macro_f1,fold_4_macro_f1,fold_5_macro_f1
-6,1.0,0.05,0.3,0.5234950690762703,0.08841274929209068,0.42857142857142855,0.6516129032258065,0.6041666666666666,0.48484848484848486,0.4482758620689655

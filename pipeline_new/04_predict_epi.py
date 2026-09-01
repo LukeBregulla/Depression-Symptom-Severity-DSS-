@@ -30,13 +30,13 @@ from transformers.modeling_outputs import SequenceClassifierOutput
 # ============================================================================
 
 # Default model to load (change to 02 or 03 best_model)
-DEFAULT_MODEL_DIR = "/zi/home/luke.bregulla/Desktop/DSS/results_new/03_pdch/best_model"
+DEFAULT_MODEL_DIR = "/zi/home/luke.bregulla/Desktop/DSS/results/03_pdch/best_model"
 
 # Default output directory for results
-DEFAULT_OUTPUT_DIR = "/zi/home/luke.bregulla/Desktop/DSS/results_new/04_pdch"
+DEFAULT_OUTPUT_DIR = "/zi/home/luke.bregulla/Desktop/DSS/results/04_pdch"
 
 # EPI dataset path (should be test split with labels)
-EPI_FILE = "/zi/home/luke.bregulla/Desktop/DSS/data_new/data_epi.csv"
+EPI_FILE = "/zi/home/luke.bregulla/Desktop/DSS/data/data_epi.csv"
 
 # Model and encoding config (must match training pipeline)
 BASE_MODEL = "microsoft/deberta-v3-base"
