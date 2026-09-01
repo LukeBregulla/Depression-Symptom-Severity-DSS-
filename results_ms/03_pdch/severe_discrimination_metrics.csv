@@ -1,0 +1,2 @@
+positive_class,support,precision,recall,roc_auc,average_precision
+severe,12,0.5,0.16666666666666666,0.41414141414141414,0.33301207837937524

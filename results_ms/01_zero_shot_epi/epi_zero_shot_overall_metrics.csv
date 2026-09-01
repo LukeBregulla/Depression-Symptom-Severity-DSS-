@@ -1,0 +1,2 @@
+n,balanced_accuracy,macro_f1,roc_auc_severe,average_precision_severe,perm_observed_macro_f1,perm_null_macro_f1_mean,perm_p_value,perm_n_permutations
+90,0.6071428571428572,0.6051938936655554,0.6621428571428571,0.4947492601264511,0.6051938936655554,0.521466573082997,0.10108989101089891,10000
